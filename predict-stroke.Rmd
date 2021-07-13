@@ -1,0 +1,923 @@
+---
+title: "Projekt z Uczenia maszynowego - predykcja udaru mózgu u pacjenta"
+author: " "
+date: " "
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '2'
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+```
+
+```{r biblioteki}
+library(rio)
+library(tidyverse)
+library(mice)
+library(DMwR2)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(kableExtra)
+library(stargazer)
+library(tables)
+library(plotrix)
+library(UBL)
+library(randomForest)
+library(klaR)
+library(MASS)
+library(e1071)
+library(ROCR)
+library(stargazer)
+```
+
+## Wstęp i cel badania
+
+Według Światowej Organizacji Zdrowia (WHO) udar mózgu jest drugą główną przyczyną zgonów na świecie, odpowiedzialną za około 11% wszystkich zgonów.
+Celem tego badania jest przewidzenie, czy pacjent może dostać udaru, na podstawie predyktorów takich jak płeć, wiek, różne choroby i status bycia palaczem. Aby osiągnąć ten cel, zbudowane zostaną modele uczenia maszynowego za pomocą różnych algorytmów, a na koniec zostanie wybrany model optymalny.
+
+## Opis zbioru badawczego, preprocessing danych
+
+Zbiór danych nosi nazwę `Stroke Prediction Dataset`, pochodzi z witryny Kaggle (https://www.kaggle.com/fedesoriano/stroke-prediction-dataset). Zbiór zawiera dane o 5109 pacjentach. Spośród nich 4860 nie doświadczyło udaru, a 249 ma udar.
+
+```{r wczytanie-danych}
+stroke <- read.csv("https://raw.githubusercontent.com/AlicjaHol/predict_stroke/main/healthcare-dataset-stroke-data.csv",
+                   na.strings = c("N/A", "Unknown"))
+```
+
+Poniżej zaprezentowano pierwsze pięć obserwacji ze zbioru badawczego.
+
+```{r}
+head(stroke) %>% kable() %>% kable_styling(full_width = T, bootstrap_options  = "striped")
+```
+
+```{r}
+stroke$hypertension <- as.factor(stroke$hypertension)
+stroke$heart_disease <- as.factor(stroke$heart_disease)
+stroke$stroke <- as.factor(stroke$stroke)
+```
+
+Liczby wystąpień poszczególnych poziomów dla zmiennych kategorycznych.
+
+```{r}
+options(knitr.kable.NA='')
+summary(stroke[,c("gender", "hypertension", "heart_disease", "ever_married", "work_type", "Residence_type", "smoking_status", "stroke")]) %>% kable() %>% kable_styling(full_width = T, bootstrap_options  = "striped")
+```
+
+Podstawowe statystyki dla zmiennych numerycznych.
+
+```{r}
+options(knitr.kable.NA=0)
+pods <- sub(".*:", "",summary(stroke[,c("age","avg_glucose_level", "bmi")])) 
+rownames(pods) <- c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.", "NA's")
+pods%>% kable() %>% kable_styling(full_width = T, bootstrap_options  = "striped")
+```
+
+
+```{r}
+
+stroke <- stroke[!stroke$gender=="Other",]
+stroke$gender <- droplevels(stroke$gender)
+```
+
+
+
+### Opis zmiennych 
+
+Cechy pacjenta zawarte w zbiorze danych:
+
+```{r zmienne}
+tabelka <- rbind(c("Zmienna", "Opis", "Typ", "Zakres", "Uwagi"),
+                 c("id", "identyfikator pacjenta", "liczba całkowita", "67-72940", "ta zmienna nie będzie użyta" ),
+               c("gender", "płeć pacjenta","zmienna jakościowa", "'Male', 'Female' lub 'Other'", "obserwacja z wartością 'Other' zostanie usunięta, ponieważ jest tylko jedna na cały zbiór danych"),
+                 c("age", "wiek pacjenta", "liczba rzeczywista", "0.08-82", ""),
+                 c("hypertension", "czy pacjent ma nadciśnienie", "zmienna jakościowa", "0 - brak nadciśnienia, 1 - nadciśnienie", ""),
+                 c("heart_disease", "czy pacjent ma choroby serca", "zmienna jakościowa", "0 - brak chorób serca, 1 - występują choroby serca", ""),
+                 c("ever_married", "czy pacjent kiedykolwiek był w związku małżeńskim", "zmienna jakościowa", "'Yes' - był lub jest w związku małżeńskim, 'No' - nigdy nie był w związku małżeńskim", ""),
+               c("work_type", "rodzaj pracy", "zmienna jakościowa", "'children' - jest dzieckiem, 'Govt_job' - praca rządowa, 'Never_worked' - nigdy nie pracował/a, 'Private' - praca w sektorze prywatnym, 'Self-employed' - samozatrudniony", ""),
+                 c('Residence_type', "typ miejsca zamieszkania", "zmienna jakościowa", "'Rural' - obszar wiejski, 'Urban' - obszar miejski", ""),
+                 c("avg_glucose_level", "średni poziom glukozy we krwi", "liczba rzeczywista", "55.12-271.74", ""),
+                 c("bmi", "wskaźnik masy ciała", "liczba rzeczywista", "10.30-97.60", "201 braków danych"),
+                 c("smoking_status", "status palacza", "zmienna jakościowa", "'Smokes' - palacz, 'formerly smoked' - były palacz, 'never smoked' - niepalący, 'Unknown' - status nieznany", "wartość 'Uknown' traktujemy jako brak danych; takich przypadków jest 1544"),
+                 c('stroke', "czy pacjent ma udar","zmienna jakościowa", "0 - nie ma udaru, 1 - ma udar", "zmienna zależna")
+                 )
+```
+
+```{r zmienne-kable, results='asis'}
+kable(tabelka) %>% 
+  kable_styling(full_width = T, bootstrap_options  = "striped")
+```
+
+
+
+
+### Braki danych
+
+```{r braki-kolumny}
+braki <- colSums(is.na(stroke)) 
+braki <- cbind(braki)
+colnames(braki) <- "Liczba braków"
+braki%>% kable() %>% kable_styling(full_width = T, bootstrap_options  = "striped")
+```
+
+W kolumnie `bmi` znajduje się 201 braków danych, w kolumnie `smoking_status` znajduje się 1544 braków danych.
+
+```{r braki-smoking, include=F}
+sum(is.na(stroke$smoking_status[stroke$work_type=="children"]))
+```
+
+Spośród 1544 braków danych dotyczących palenia, 618 to dane dotyczące dzieci (`work_type=children`). 
+
+
+
+```{r mdpattern, fig.fullwidth=T}
+md.pattern(stroke, rotate.names = T) %>% kable() %>% kable_styling(full_width = T, bootstrap_options  = "striped")
+```
+
+```{r braki-stroke}
+stroke %>% 
+  dplyr::select(stroke, bmi, smoking_status) %>% 
+  group_by(stroke) %>% 
+  summarise_each(funs(sum(is.na(.)))) %>% kable() %>% kable_styling(full_width = T, bootstrap_options  = "striped")
+```
+
+Większość braków znajduje się w grupie osób niemających udaru (ok. 80% braków w bmi oraz ok. 96% braków w status_smoking).
+
+```{r imputacja, include=F}
+stroke.full <- knnImputation(stroke, k=5, scale=F, meth="pmm")
+sum(is.na(stroke.full))
+```
+
+Braki zostały wypełnione za pomocą metody `pmm` ("Predictive Mean Matching").
+
+## Eksploracyjna analiza danych
+
+W celu wstępnego zbadania, które zmienne mogą mieć wpływ na wystąpienie udaru, przeprowadzimy eksploracyjną analizę danych.
+
+### Występowanie udaru w zależności od wieku
+
+```{r stroke-age}
+ggplot(stroke, aes(x=stroke, y=age, fill=stroke))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład wieku w podziale na pacjentów bez udaru i z udarem")+
+  theme_bw()
+```
+
+```{r}
+plot(density(stroke$age[stroke$stroke==1]), col="#ee5e5e", main="Rozkład wieku w podziale na pacjentów bez udaru i z udarem")
+lines(density(stroke$age[stroke$stroke==0]), col="#7777D9")
+legend("topleft", legend=c("control", "stroke"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+
+```{r, include=F}
+median(stroke$age[stroke$stroke=="1"])
+median(stroke$age[stroke$stroke=="0"])
+```
+
+Z wykresu ramka-wąsy widać znaczną różnicę w medianie wieku pomiędzy grupami z udarem i bez. Ta mediana jest znacznie większa w grupie z udarami - wynosi 71 lat, podczas gdy w grupie bez udaru wynosi 43. Na wykresie gęstości również jest zauważalne częstsze występowanie osób w bardziej zaawansowanym wieku.
+
+###  Występowanie udaru w zależności od BMI
+
+```{r stroke-bmi}
+ggplot(stroke.full, aes(x=stroke, y=bmi, fill=stroke))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład BMI w podziale na pacjentów bez udaru i z udarem")+
+  theme_bw()
+```
+
+```{r}
+plot(density(stroke.full$bmi[stroke.full$stroke==1]), col="#ee5e5e", main="Rozkład BMI w podziale na pacjentów bez udaru i z udarem")
+lines(density(stroke.full$bmi[stroke.full$stroke==0]), col="#7777D9")
+legend("topright", legend=c("control", "stroke"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+
+Nie widać znacznej różnicy w medianie `bmi` pomiędzy grupami. W grupie bez udarów zróżnicowanie `bmi` jest trochę większe. Na wykresie gęstości widać, że BMI było trochę wyższe w grupie pacjentów z udarem niż u tych bez udaru.
+
+###  Występowanie udaru w zależności od płci
+
+```{r stroke-gender}
+
+par(mar=c(5.1, 6.1, 5.1, 8), xpd=TRUE)
+colf <- colorRampPalette(c("white","royalblue"))
+ptab <- prop.table(table(stroke$gender, stroke$stroke), margin = 2)
+ptab <- round(ptab, 2)*100
+bar <- barplot(ptab, col=colf(3), main="Procentowy rozkład płci wśród pacjentów bez udaru i z udarem", 
+               xlab="stroke", ylab="%")
+legend("topright", legend=c("Female", "Male"), fill=colf(3), inset=c(-0.3, 0))
+barlabels(bar,ptab)
+```
+
+```{r results='asis'}
+tabelka <- tabular((`Gender` = stroke$gender)~  Format(digits =2)*(`Stroke` = stroke$stroke)*Heading()*Percent("col"))
+
+ toKable(tabelka, format = "html") %>%
+   kable_styling(full_width = TRUE)
+```
+
+
+W grupie osób mających udar, podobny jest udział procentowy kobiet oraz mężczyzn, choć kobiet jest troszkę więcej (57% kobiet i 43% mężczyzn). Procentowy rozkład płci jest podobny w grupach z udarem oraz bez udaru.
+
+### Występowanie udaru w zależności od nadciśnienia
+
+```{r stroke-hypertension}
+tabelka <- tabular((`Hypertension` = stroke$hypertension)~  Format(digits =2)*(`Stroke` = stroke$stroke)*Heading()*Percent("col"))
+
+ toKable(tabelka, format = "html") %>%
+   kable_styling(full_width = TRUE)
+
+```
+
+```{r}
+par(mar=c(5.1, 5.1, 5.1, 10), xpd=TRUE)
+ptab <- prop.table(table(stroke$hypertension, stroke$stroke), margin = 2)
+ptab <- round(ptab, 2)*100
+bar <- barplot(ptab, col=colf(3), main=paste("Procentowy rozkład osób z nadciśnieniem", "\n", "wśród pacjentów bez udaru i z udarem"), xlab="stroke", ylab="%")
+legend("topright", legend=c("no hypertension", "hypertension"), fill=colf(3), inset=c(-0.5,0))
+barlabels(bar,ptab)
+```
+
+
+W grupie osób mających udar, więcej jest osób bez nadciśnienia (stanowią one ok. 73%) niż z nadciśnieniem. W grupie z udarem procentowo jest mniej osób bez nadciśnienia niż w grupie bez udaru.
+
+### Występowanie udaru w zależności od występowania chorób serca
+
+```{r stroke-heart}
+tabelka <- tabular((`Heart disease` = stroke$heart_disease)~  Format(digits =2)*(`Stroke` = stroke$stroke)*Heading()*Percent("col"))
+
+ toKable(tabelka, format = "html") %>%
+   kable_styling(full_width = TRUE)
+```
+
+```{r}
+par(mar=c(5.1, 6.1, 5.1, 10.5), xpd=TRUE)
+ptab <- prop.table(table(stroke$heart_disease, stroke$stroke), margin = 2)
+ptab <- round(ptab, 2)*100
+bar <- barplot(ptab, col=colf(3), main=paste("Rozkład osób z chorobami serca", "\n", "wśród pacjentów bez udaru i z udarem"),
+               xlab="stroke", ylab="%")
+legend("topright", legend=c("no heart disease", "heart disease"), fill=colf(3), inset=c(-0.55,0))
+barlabels(bar,ptab)
+```
+
+W grupie osób mających udar, więcej jest osób bez chorób serca (jest to ok. 81%). Procentowo w grupie z udarem jest mniej osób wolnych od chorób serca niż w grupie bez udaru.
+
+### Występowanie udaru w zależności od średniego poziomu glukozy we krwi
+
+```{r stroke-glucose}
+ggplot(stroke, aes(x=stroke, y=avg_glucose_level, fill=stroke))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title=~atop("Średni poziom glukozy we krwi",  "z podziałem na pacjentów bez udaru i z udarem"))+
+  theme_bw()
+```
+
+```{r}
+plot(density(stroke$avg_glucose_level[stroke$stroke==0]), col="#7777D9", main=paste("Rozkład średniego poziomu glukozy", "\n"," w podziale na pacjentów bez udaru i z udarem"))
+lines(density(stroke$avg_glucose_level[stroke$stroke==1]), col="#ee5e5e")
+legend("topright", legend=c("control", "stroke"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+
+W grupie osób bez udaru jest niższy średni poziom glukozy, co widać zarówno z wykresu ramka-wąsy jak i z wykresu gęstości.
+
+### Występowanie udaru w zależności od stanu cywilnego
+
+```{r stroke-married}
+tabelka <- tabular((`Ever married` = stroke$ever_married)~  Format(digits =2)*(`Stroke` = stroke$stroke)*Heading()*Percent("col"))
+
+ toKable(tabelka, format = "html") %>%
+   kable_styling(full_width = TRUE)
+```
+
+```{r}
+par(mar=c(5.1, 6.1, 5.1, 9), xpd=TRUE)
+ptab <- prop.table(table(stroke$ever_married, stroke$stroke), margin = 2)
+ptab <- round(ptab, 2)*100
+bar <- barplot(ptab, col=colf(3), main=paste("Procentowy rozkład stanu cywilnego","\n", "wśród pacjentów bez udaru i z udarem"), xlab="stroke", ylab="%")
+legend("topright", legend=c("never married", "is/was married"), fill=colf(3), inset=c(-0.45,0))
+barlabels(bar,ptab)
+```
+
+W grupie osób mających udar, znacznie więcej jest osób, które są lub były w związku małżeńskim (88%). Procentowo w grupie z udarem jest więcej osób będących (obecnie lub w przeszłości) w związku małżeńskim, niż w grupie bez udaru.
+
+### Występowanie udaru w zależności od rodzaju pracy
+
+```{r stroke-work}
+tabelka <- tabular((`Work type` = stroke$work_type)~  Format(digits =2)*(`Stroke` = stroke$stroke)*Heading()*Percent("col"))
+
+ toKable(tabelka, format = "html") %>%
+   kable_styling(full_width = TRUE)
+```
+
+```{r}
+par(mar=c(5.1, 6.1, 5.1, 9), xpd=TRUE)
+ptab <- prop.table(table(stroke$work_type, stroke$stroke), margin = 2)
+ptab <- round(ptab, 2)*100
+bar <- barplot(ptab, col=colf(5), main=paste("Procentowy rozkład typu pracy","\n", "wśród pacjentów bez udaru i z udarem"),xlab="stroke", ylab="%")
+legend("topright", legend=c("children", "govt_job", "never_worked", "private", "self-emp"), fill=colf(5), inset=c(-0.45,0))
+barlabels(bar,ptab)
+```
+
+
+W grupie osób mających udar, najwięcej osób jest zatrudniona w sektorze prywatnym (60%), a następnie osób samozatrudnionych (26%) i osób pracujących dla rządu (13%). Oprócz tego w grupie pojawia się dwoje dzieci. Nie pojawiają się osoby, które nigdy nie pracowały.
+
+### Występowanie udaru w zależności od statustu palacza
+
+```{r stroke-smoking}
+tabelka <- tabular((`Smoking status` = stroke$smoking_status)~  Format(digits =2)*(`Stroke` = stroke$stroke)*Heading()*Percent("col"))
+
+ toKable(tabelka, format = "html") %>%
+   kable_styling(full_width = TRUE)
+```
+
+
+```{r}
+par(mar=c(5.1, 6.1, 5.1, 10), xpd=TRUE)
+ptab <- prop.table(table(stroke$smoking_status, stroke$stroke), margin = 2)
+ptab <- round(ptab, 2)*100
+bar <- barplot(ptab, col=colf(3), main=paste("Procentowy rozkład statusu palacza","\n", "wśród pacjentów bez udaru i z udarem"), xlab = "stroke", ylab="%")
+legend("topright", legend=c("formerly smoked", "never smoked", "smokes"), fill=colf(3), inset=c(-0.5,0))
+barlabels(bar,ptab)
+```
+
+
+W grupie osób mających udar, najwięcej jest osób które nigdy nie paliły (43%), następnie byłych palaczy (36%). Procentowa liczba osób palących jest podobna w grupach z udarem oraz bez udaru. W grupie z udarem proporcjonalnie jest mniej osób które nigdy nie paliły, a więcej osób, które są byłymi palaczami.
+
+### Występowanie udaru w zależności od miejsca zamieszkania
+
+```{r stroke-residence}
+tabelka <- tabular((`Residence type` = stroke$Residence_type)~  Format(digits =2)*(`Stroke` = stroke$stroke)*Heading()*Percent("col"))
+
+ toKable(tabelka, format = "html") %>%
+   kable_styling(full_width = TRUE)
+```
+
+```{r}
+par(mar=c(5.1, 6.1, 5.1, 8), xpd=TRUE)
+ptab <- prop.table(table(stroke$Residence_type, stroke$stroke), margin = 2)
+ptab <- round(ptab, 2)*100
+bar <- barplot(ptab, col=colf(3), main=paste("Procentowy rozkład miejsca zamieszkania" ,"\n", "wśród pacjentów bez udaru i z udarem"),xlab="stroke", ylab="%")
+legend("topright", legend=c("rural", "urban"), fill=colf(3), inset=c(-0.25,0))
+barlabels(bar,ptab)
+```
+
+
+Rozkład miejsca zamieszkania jest podobny dla obu grup. Podobny procent osób mieszka w mieście jak i na wsi, z nieznaczną przewagą mieszkańców miast.
+
+Po przeanalizowaniu wszystkich predyktorów znajdujących się w zbiorze, można przypuszczać, że na wystąpienie udaru mogą mieć wpływ: wyższy wiek, wyższe BMI, wyższy średni poziom glukozy we krwi, stan cywilny, być może także występowanie chorób serca i nadciśnienia bądź rodzaj wykonywanej pracy. Można się spodziewać, że płeć, status palacza oraz miejsce zamieszkania nie będą miały dużego wpływu.
+
+## Dobór metod analizy obiektu badawczego, podział zbioru
+
+Do predykcji udaru zostaną wykorzystane następujące algorytmy:
+
+- regresja logistyczna
+
+- drzewo decyzyjne
+
+- las losowy
+
+- k najbliższych sąsiadów
+
+- naiwny klasyfikator Bayesowski
+
+- analiza dyskryminacyjna
+
+
+
+
+
+```{r smote-podzial}
+stroke.full <- stroke.full %>% dplyr::select(-id)
+stroke.full$age <- scale(stroke.full$age)
+stroke.full$avg_glucose_level <- scale(stroke.full$avg_glucose_level)
+stroke.full$bmi <- scale(stroke.full$bmi)
+
+set.seed(2021)
+new.df <- SmoteClassif(stroke~., stroke.full, C.perc="balance", dist="HEOM")
+
+
+set.seed(2021)
+podzial <- createDataPartition(new.df$stroke, p=2/3)
+dt.ucz <- new.df[podzial$Resample1,]
+dt.test <- new.df[-podzial$Resample1,]
+```
+
+Zbiór danych wykorzystywany w tym badaniu jest bardzo niezbalansowany - jedynie niecałe 5% z pacjentów doświadczyło udaru. W związku z tym zastosujemy metodę oversamplingu SMOTE (Synthetic Minority Oversampling Technique).
+
+Przed zastosowaniem tego przekształcenia, także podjęto próby zbudowania modeli klasyfikacji. Jednakże, mimo że dokładność wynosiła zwykle ok. 94%, to odsetek poprawnie klasyfikowanych przypadków wystąpienia udaru (`stroke==1`) był bardzo niski, a najczęściej wynosił zero.
+
+```{r smote-ramka, include=F}
+summary(new.df$stroke) 
+```
+
+
+Po zastosowaniu SMOTE, dysponujemy zbiorem danych, w którym jest 2553 przypadki udaru oraz 2554 pacjentów bez udaru. Ten zbiór danych zostanie podzielony na zbiór uczący i testowy w proporcji 2:1.
+
+Przed budową modeli zmienne numeryczne zostały zestandaryzowane, sprawdzono także, czy nie pojawiają się zmienne o wariancji bliskiej zero (near-zero variance).
+
+
+
+## Budowa modeli
+
+
+
+
+
+### Regresja logistyczna
+
+Regresja logistyczna jest techniką klasyfikacji, którą można stosować, gdy zmienna zależna jest dychotomiczna, tj. ma tylko dwa możliwe stany (np. obecność choroby vs nieobecność).
+
+```{r glm, include=F}
+mod.glm <- glm(stroke~., data=dt.ucz, family=binomial())
+summary(mod.glm)
+```
+
+<div align="center" style="margin-bottom:2em">
+
+```{r results='asis'}
+stargazer(mod.glm, type="html")
+```
+
+</div>
+
+Na wystąpienie udaru istotny wpływ ma wiek, występowanie nadciśnienia, typ pracy oraz średni poziom glukozy we krwi. Na granicy istotności są rodzaj miejsca zamieszkania oraz status palacza.
+
+Poniżej znajduje się macierz błędów dla modelu regresji logistycznej.
+
+```{r glm2, results='asis', out.width="60%", out.height="60%", fig.align="center"}
+
+pred.glm <- predict(mod.glm, newdata=dt.test, type="response")
+pred.glm <- ifelse(pred.glm>0.5, 1, 0)
+lab.glm <- dt.test$stroke
+
+
+table <- data.frame(confusionMatrix(as.factor(pred.glm), dt.test$stroke)$table)
+
+plotTable <- table %>%
+  mutate(is_correct = ifelse(table$Prediction == table$Reference, "yes", "no")) #%>%
+
+ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = is_correct)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c(yes = "#a5ea8b", no = "#F08080")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference)))
+
+```
+
+Dokładność modelu regresji logistycznej wynosi około 80.08%.
+
+
+
+```{r, include=F}
+pred1 <- prediction(pred.glm, dt.test$stroke)
+perf <- performance(pred1, measure="tpr", x.measure="fpr")
+roc.perf = performance(pred1, measure = "tpr", x.measure = "fpr")
+plot(roc.perf)
+abline(a=0, b= 1)
+auc.perf <- performance(pred1, measure="auc")
+auc.perf@y.values
+```
+
+
+###  Drzewo decyzyjne
+
+Drzewa decyzyjne (ang. decision trees) stanowią wszechstronne algorytmy uczenia maszynowego, które mogą być użyte zarówno w zadaniach klasyfikacji, jak i regresji. Są również elementami składowymi lasów losowych. Drzewo decyzyjne składa się z korzenia, węzłów i liści. W przypadku zadania klasyfikacji, liście zawierają informację o tym, która klasa jest najbardziej prawdopodobna dla danej obserwacji. W węzłach występują warunki podziału. Drzewa decyzyjne typu CART są zawsze drzewami binarnymi - co oznacza, że węzły niebędące liściami zawsze mają dokładnie dwóch potomków.
+
+```{r factory}
+dt.ucz$stroke <- ifelse(dt.ucz$stroke=="1", "yes", "no")
+dt.test$stroke <- ifelse(dt.test$stroke=="1", "yes", "no")
+```
+
+
+```{r rpart}
+
+control <- trainControl(method = "repeatedcv", number = 10, repeats = 5,
+                        summaryFunction = twoClassSummary,
+                        classProbs = TRUE)
+mod.rpart <- train(stroke~., data=dt.ucz, 
+                   method="rpart",
+                   trControl=control,
+                   tuneLength=10,
+                   metric="ROC")
+```
+
+Rysunek przedstawiający otrzymane drzewo decyzyjne znajduje się w załączniku pdf, ponieważ ze względu na niską czytelność nie dało się go tutaj zamieścić.
+
+```{r include=F}
+mod.rpart
+```
+
+```{r, include=F}
+#plot(mod.rpart)
+plot(mod.rpart$finalModel)
+text(mod.rpart$finalModel)
+library(rattle)
+fancyRpartPlot(mod.rpart$finalModel)
+```
+
+
+
+```{r, include=F}
+varImp(mod.rpart$finalModel) %>% kable() %>% kable_styling(full_width = T)
+```
+
+
+
+```{r}
+war <- varImp(mod.rpart$finalModel)
+df <- data.frame(imp=war$Overall)
+rownames(df) <- rownames(war)
+df2 <- df %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(imp) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+ggplot2::ggplot(df2) +
+  geom_col(aes(x = variable, y = imp),
+           col = "black", show.legend = F) +
+  coord_flip() +
+  scale_fill_grey() +
+  theme_bw()
+```
+
+Powyżej widać ważność poszczególnych zmiennych w modelu drzewa decyzyjnego. Najważniejsze zmienne to wiek, średni poziom glukozy we krwi, bmi, stan cywilny.
+
+Poniżej znajduje się macierz błędów dla modelu drzewa decyzyjnego.
+
+```{r, results='asis', out.width="60%", out.height="60%", fig.align="center"}
+lab.rpart <- dt.test$stroke
+pred.rpart <- predict(mod.rpart, newdata=dt.test)
+table <- data.frame(confusionMatrix(pred.rpart, as.factor(dt.test$stroke))$table)
+
+plotTable <- table %>%
+  mutate(is_correct = ifelse(table$Prediction == table$Reference, "yes", "no")) #%>%
+
+
+ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = is_correct)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c(yes = "#a5ea8b", no = "#F08080")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference)))
+```
+
+
+Dokładność drzewa decyzyjnego wynosi około 81.43%.
+
+
+
+```{r, include=F}
+pred2 <- prediction(as.numeric(pred.rpart), as.numeric(as.factor(dt.test$stroke)))
+perf <- performance(pred2, measure="tpr", x.measure="fpr")
+roc.perf = performance(pred2, measure = "tpr", x.measure = "fpr")
+plot(roc.perf)
+abline(a=0, b= 1)
+auc.perf <- performance(pred2, measure="auc")
+auc.perf@y.values
+```
+
+### Las losowy
+
+Lasy losowe są uogólnieniem drzew decyzyjnych. Przy budowie lasu losowego po pierwsze podobnie jak przy metodzie bagging, losujemy wiele prób bootstrapowych ze zbioru uczącego; po drugie dla każdej próby budujemy drzewo decyzyjne, które zawiera tylko $m$ predyktorów wylosowanych ze wszystkich $p$ predyktorów (zazwyczaj $m=\sqrt{p}$); na koniec uśredniamy predykcje ze wszystkich drzew aby otrzymać ostateczną predykcję.
+
+```{r factory1}
+set.seed(2021)
+dt.ucz$stroke <- factor(dt.ucz$stroke, levels=c("yes", "no"))
+dt.test$stroke <- factor(dt.test$stroke, levels=c("yes", "no"))
+```
+
+```{r rf, include=F}
+
+mod.rf <- randomForest(formula=stroke~., data=dt.ucz)
+
+```
+
+```{r rf-tune, include=F}
+model_tuned <- tuneRF(
+               x=dt.ucz[,-ncol(dt.ucz)], 
+               y=dt.ucz$stroke, 
+               ntreeTry=500,
+               mtryStart=4, 
+               stepFactor=1.5,
+               improve=0.01,
+               trace=T
+               ) 
+```
+
+Przed budową ostatecznego modelu lasu losowego, zostało sprawdzone, jaka liczba predyktorów $m$ skutkuje najlepszą dokładnością. Taką liczbą okazuje się być $m=4$ (ponieważ ma najniższą wartość błędu OOB). Bierzemy tutaj pod uwagę wartość błędu OOB (Out of Bag Error), czyli średnią wartość błędu predykcji dla danej obserwacji, gdzie do liczenia średniej brane są pod uwagę tylko te drzewa, do budowy których użyto próby niezawierającej tej obserwacji.
+
+```{r}
+model_tuned %>% kable() %>% kable_styling(full_width = T, bootstrap_options = "striped")
+```
+
+
+```{r rf-pred}
+mod.rf.tuned <- randomForest(formula=stroke~., data=dt.ucz, mtry=4)
+pred.rf <- predict(mod.rf.tuned, newdata=dt.test)
+table <- data.frame(confusionMatrix(pred.rf, dt.test$stroke)$table)
+```
+
+Poniższy rysunek przedstawia zmniejszanie się błędu OOB w miarę jak rośnie liczba drzew. Widać, że błąd jest najmniejszy dla grupy pacjentów z udarem (na wykresie zaznaczona kolorem czerwonym).
+
+```{r}
+plot(mod.rf.tuned, main=paste("Błąd OOB dla całej populacji oraz poszczególnych grup", "\n", "w zależności od liczby drzew"))
+legend("topright", legend=c("all", "stroke", "control"), col=c("black", "red", "green"), lty=c(1, 2, 3))
+```
+
+Kolejny wykres przedstawia ważność zmiennych w modelu lasu losowego. Najważniejszą cechą jest wiek, kolejne ważne cechy to średni poziom glukozy we krwi oraz BMI.
+
+```{r}
+varImpPlot(mod.rf.tuned, main=paste("Ważność poszczególnych zmiennych","\n","w modelu lasu losowego"))
+```
+
+Poniżej jest zaprezentowana macierz błędów dla modelu lasu losowego.
+
+```{r, results='asis', out.width="60%", out.height="60%", fig.align="center"}
+plotTable <- table %>%
+  mutate(is_correct = ifelse(table$Prediction == table$Reference, "yes", "no")) #%>%
+
+
+ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = is_correct)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c(yes = "#a5ea8b", no = "#F08080")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference)))
+```
+
+
+```{r, include=F}
+pred3 <- prediction(as.numeric(pred.rf), as.numeric(dt.test$stroke))
+perf <- performance(pred3, measure="tpr", x.measure="fpr")
+roc.perf = performance(pred3, measure = "tpr", x.measure = "fpr")
+plot(roc.perf)
+abline(a=0, b= 1)
+auc.perf <- performance(pred3, measure="auc")
+auc.perf@y.values
+```
+
+Dokładność tego modelu wynosi 88.01%
+
+### Metoda k najbliższych sąsiadów
+
+W metodzie $k$ najbliższych sąsiadów, wartość zmiennej wynikowej jest przewidywana na podstawie $k$ najbliższych obserwacji ze zbioru uczącego. Metoda ta może być wykorzystywana zarówno do regresji jak i klasyfikacji.
+
+```{r knn}
+grid <- expand.grid(k = 2:30)
+
+mod.knn <- train(stroke~., 
+                 data = dt.ucz,
+                 method = "knn",
+                 trControl = control,
+                 tuneGrid = grid,
+                 metric = "ROC") # final value k=5
+pred.knn <- predict(mod.knn, newdata = dt.test, type = "prob")
+pred.knn.class <- predict(mod.knn, newdata = dt.test)
+```
+
+
+Aby dobrać jak najdokładniejszy model, zostaną zbadane parametry $k$ od 2 do 30. Okazuje się, że najlepszy model to model z parametrem $k$ równym 5.
+
+
+Poniżej widać ważność poszczególnych zmiennych w modelu $k$ najbliższych sąsiadów.
+
+```{r}
+war <- varImp(mod.knn)
+imp <- data.frame("varImp"=round(war$importance$yes,2))
+rownames(imp) <- rownames(war$importance)
+imp %>% arrange(-varImp)%>% kable() %>% kable_styling(full_width = T, bootstrap_options = "striped")
+```
+
+Najważniejszą zmienną jest wiek, następnie średni poziom glukozy, stan cywilny, rodzaj pracy, BMI, występowanie nadciśnienia. Płeć w ogóle nie jest istotna.
+
+Poniżej zaprezentowana jest macierz błędów dla modelu $k$ najbliższych sąsiadów. Dokładność tego modelu wyniosła 85.08%
+
+```{r, results='asis', out.width="60%", out.height="60%", fig.align="center"}
+table <- data.frame(confusionMatrix(pred.knn.class, as.factor(dt.test$stroke))$table)
+
+plotTable <- table %>%
+  mutate(is_correct = ifelse(table$Prediction == table$Reference, "yes", "no")) #%>%
+
+
+ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = is_correct)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c(yes = "#a5ea8b", no = "#F08080")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference)))
+```
+
+
+
+```{r include=F}
+pred4 <- prediction(as.numeric(pred.knn.class), as.numeric(dt.test$stroke))
+perf <- performance(pred4, measure="tpr", x.measure="fpr")
+roc.perf = performance(pred4, measure = "tpr", x.measure = "fpr")
+plot(roc.perf)
+abline(a=0, b= 1)
+auc.perf <- performance(pred4, measure="auc")
+auc.perf@y.values
+```
+
+### Naiwny klasyfikator Bayesowski
+
+Naiwny klasyfikator Bayesowski działa w oparciu o twierdzenie Bayesa. Zakłada on niezależność poszczególnych predyktorów. Ponieważ założenie to zazwyczaj nie jest spełnione w praktyce, stąd w nazwie przymiotnik "naiwny".
+
+```{r nb}
+
+mod.nb <- NaiveBayes(stroke~., data=dt.ucz)
+pred.nb <- predict(mod.nb, newdata=dt.test, type="response")
+```
+
+
+```{r, include=F}
+plot(mod.nb) # chyba nie ma co zamieszczac tego wszystkiego
+```
+
+Poniżej jest przedstawiona macierz błędów dla predykcji na zbiorze testowym przy użyciu naiwnego klasyfikatora Bayesowskiego.
+
+```{r, results='asis', out.width="60%", out.height="60%", fig.align="center"}
+table <- data.frame(confusionMatrix(pred.nb$class, dt.test$stroke)$table)
+
+plotTable <- table %>%
+  mutate(is_correct = ifelse(table$Prediction == table$Reference, "yes", "no")) #%>%
+
+
+ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = is_correct)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c(yes = "#a5ea8b", no = "#F08080")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference)))
+```
+
+Dokładność naiwnego klasyfikatora Bayesowskiego wynosi 77.56%.
+
+
+
+```{r include=F}
+pred5 <- prediction(as.numeric(pred.nb$class), as.numeric(dt.test$stroke))
+perf <- performance(pred5, measure="tpr", x.measure="fpr")
+roc.perf = performance(pred5, measure = "tpr", x.measure = "fpr")
+plot(roc.perf)
+abline(a=0, b= 1)
+auc.perf <- performance(pred5, measure="auc")
+auc.perf@y.values
+```
+
+### Analiza dyskryminacyjna
+
+Analiza dyskryminacyjna jest stosowana do rozstrzygania, które zmienne pozwalają w najlepszy sposób separować obiekty należące do różnych klas.
+
+Zostaną zbudowane modele liniowej oraz mieszanej analizy dyskryminacyjnej. Liniowa analiza dyskryminacyjna zakładała, że średnie w klasach są różne ale macierz kowariancji wszystkich klas jest jednakowa. Analiza dyskryminacyjna mieszana zakłada, że każda klasa może być charakteryzowana przez wiele wielowymiarowych rozkładów normalnych, których średnie mogą się różnić, ale macierze kowariancji nie.
+
+
+```{r}
+Ctrl <- trainControl(summaryFunction=twoClassSummary,
+                     classProbs=TRUE)
+mod.lda <- train(stroke~., data=dt.ucz, method="lda",
+                  trControl=Ctrl,
+                  metric="ROC")
+```
+
+Poniżej widać ważność poszczególnych zmiennych w modelu LDA.
+
+```{r}
+war <- varImp(mod.lda)
+imp <- data.frame("varImp"=round(war$importance$yes, 2))
+rownames(imp) <- rownames(war$importance)
+imp %>% arrange(-varImp)%>% kable() %>% kable_styling(full_width = T, bootstrap_options = "striped")
+```
+
+Otrzymana ważność zmiennych jest identyczna jak w modelu metody $k$ najbliższych sąsiadów. 
+Poniżej jest widoczna macierz błędów dla modelu liniowej analizy dyskryminacyjnej (LDA).
+
+```{r, results='asis', out.width="60%", out.height="60%", fig.align="center"}
+
+pred.lda <- predict(mod.lda, newdata=dt.test)
+
+
+table <- data.frame(confusionMatrix(pred.lda, as.factor(dt.test$stroke))$table)
+
+plotTable <- table %>%
+  mutate(is_correct = ifelse(table$Prediction == table$Reference, "yes", "no")) #%>%
+
+
+ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = is_correct)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c(yes = "#a5ea8b", no = "#F08080")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference)))
+```
+
+
+Dokładność modelu LDA to około 80.14%.
+
+
+
+
+```{r include=F}
+pred6 <- prediction(as.numeric(pred.lda), as.numeric(dt.test$stroke))
+perf <- performance(pred6, measure="tpr", x.measure="fpr")
+roc.perf = performance(pred6, measure = "tpr", x.measure = "fpr")
+plot(roc.perf)
+abline(a=0, b= 1)
+auc.perf <- performance(pred6, measure="auc")
+auc.perf@y.values
+```
+
+Następnie zaprezentowana jest macierz błędów dla modelu mieszanej analizy dyskryminacyjnej (MDA).
+
+```{r mda, results='asis', out.width="60%", out.height="60%", fig.align="center"}
+grid <- expand.grid(subclasses = 2:5)
+
+mod.mda <- train(stroke~., 
+                 data = dt.ucz,
+                 method = "mda",
+                 trControl = control,
+                 tuneGrid = grid,
+                 metric = "ROC")
+pred.mda <- predict(mod.mda, newdata=dt.test)
+
+
+table <- data.frame(confusionMatrix(pred.mda, as.factor(dt.test$stroke))$table)
+
+plotTable <- table %>%
+  mutate(is_correct = ifelse(table$Prediction == table$Reference, "yes", "no")) #%>%
+
+
+ggplot(data = plotTable, mapping = aes(x = Reference, y = Prediction, fill = is_correct)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), vjust = .5, fontface  = "bold", alpha = 1) +
+  scale_fill_manual(values = c(yes = "#a5ea8b", no = "#F08080")) +
+  theme_bw() +
+  xlim(rev(levels(table$Reference)))
+```
+
+Dokładność modelu MDA to około 80.38%.
+
+Modele LDA oraz MDA osiągają bardzo zbliżoną dokładność na poziomie około 80%.
+
+## Porównanie modeli i wnioski
+
+Porównanie modeli ze względu na dokładność (accuracy).
+
+```{r accuracy}
+dokl <- cbind(c("Regresja logistyczna", "Drzewo decyzyjne", "Las losowy", "Metoda k najbliższych sąsiadów", "Naiwny klasyfikator Bayesowski", "Liniowa analiza dyskryminacyjna","Mieszana analiza dyskryminacyjna"),
+      c("80.08 %", "81.43 %", "88.01 %", "84.96 %", "77.56 %", "80.14 %", "80.38 %")) 
+
+colnames(dokl) <- c("Model", "Accuracy")
+```
+
+```{r}
+kable(dokl) %>% 
+   kable_styling(full_width = T) %>% 
+    row_spec(3, background = "#a5ea8b") %>% 
+  row_spec(5, background = "#F08080")
+```
+
+Najlepiej dopasowanym modelem ze względu na dokładność jest las losowy przy 88% dokładności. Najmniej dokładny jest model z naiwnym klasyfikatorem Bayesowskim (poniżej 80%).
+
+W modelu lasu losowego, najważniejszą cechą jest wiek. Kolejnymi cechami, które są ważniejsze niż pozostałe, są średni poziom glukozy we krwi oraz BMI. Te 3 cechy mają największy wpływ na wykrycie udaru. W modelach LDA oraz KNN również najważniejszą zmienną był wiek. Następne ważne zmienne to średni poziom glukozy, stan cywilny, rodzaj pracy, BMI. W modelu drzewa decyzyjnego najważniejszymi zmiennymi był wiek, średni poziom glukozy we krwi, BMI, stan cywilny, występowanie chorób serca. Z kolei w modelu regresji logistycznej, zmiennymi istotnymi były: wiek, rodzaj pracy, średni poziom glukozy, płeć, występowanie nadciśnienia oraz fakt bycia palaczem.
+
+Podsumowując powyższe wyniki, wiek jest najważniejszą cechą mającą wpływ na wykrycie udaru. Innymi ważnymi zmiennymi były między innymi średni poziom glukozy oraz BMI. W kilku modelach również istotny był rodzaj pracy oraz stan cywilny.
+
+Na wartość modeli może negatywnie wpływać fakt, że mimo iż BMI jest bardzo istotną zmienną, to była to zmienna, dla której występowały braki danych (dane były wybrakowane dla około 16% osób z udarem z oryginalnego zbioru danych i dla około 3% osób bez udaru). Drugim czynnikiem, który potencjalnie może obniżać wartość otrzymanych modeli, jest niezbalansowanie oryginalnego zbioru danych (gdzie mniej niż 5% stanowili pacjenci z udarem). Rozwiązaniem było zastosowanie techniki SMOTE, jednakże być może modele otrzymane na podstawie bardziej zbalansowanego zbioru danych lepiej odzwierciedlałyby rzeczywistość. 
+
+Warto zaznaczyć także, że wszystkie modele miały niższy błąd klasyfikacji dla grupy osób z udarem niż dla grupy kontrolnej (najlepiej sprawdziła się w tej kwestii metoda $k$ najbliższych sąsiadów, dzięki której ponad 95% pacjentów z udarem w zbiorze testowym zostało zaklasyfikowanych poprawnie).
+
+```{r, include=F}
+#predy <- cbind(pred.glm, pred.rpart, pred.rf, pred.knn.class, pred.nb$class, pred.lda$class)
+##labele <- cbind(lab.glm, lab.rpart, dt.test$stroke, dt.test$stroke, dt.test$stroke, dt.test$stroke)
+#manypred <- prediction(predy, labele)
+#many.roc.perf <- performance(manypred, measure="tpr", x.measure = "fpr")
+#plot(many.roc.perf, col=c("black", "red", "green", "yellow", "pink", "blue"))
+#abline(a=0, b= 1)
+# sth wrong
+```
+
+
+## Bibliografia
+
+- Brownlee J., "SMOTE Oversampling for imbalanced classification" https://machinelearningmastery.com/smote-oversampling-for-imbalanced-classification/ (dostęp: 03.06.2021)
+
+- Geron A., "Uczenie maszynowe z użyciem Scikit-Learn i TensorFlow", Helion 2020
+
+
+- Majerek D., "Eksploracja Danych", Politechnika Lubelska, 2020 https://dax44.github.io/datamining/
+
+- R-bloggers, "A small introduction to the ROCR package" https://www.r-bloggers.com/2014/12/a-small-introduction-to-the-rocr-package/ (dostęp: 15.06.2021)
+
+- Statology, "How to Build Random Forests in R (Step-by-Step)" https://www.statology.org/random-forest-in-r/ (dostęp: 05.06.2021)
+
+
